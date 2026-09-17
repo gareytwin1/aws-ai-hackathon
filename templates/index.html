@@ -1,0 +1,771 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pipeline Leak Detection Agent</title>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --surface: #1e293b;
+            --surface2: #334155;
+            --border: #475569;
+            --text: #f1f5f9;
+            --text-muted: #94a3b8;
+            --accent: #3b82f6;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+            --success: #22c55e;
+            --info: #06b6d4;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+        }
+        .header {
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            padding: 16px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .header h1 {
+            font-size: 20px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .header .status-badge {
+            font-size: 12px;
+            padding: 4px 10px;
+            border-radius: 12px;
+            background: var(--success);
+            color: #000;
+            font-weight: 600;
+        }
+        .main-grid {
+            display: grid;
+            grid-template-columns: 1fr 400px;
+            grid-template-rows: auto 1fr;
+            height: calc(100vh - 60px);
+            gap: 1px;
+            background: var(--border);
+        }
+        .panel {
+            background: var(--surface);
+            overflow-y: auto;
+        }
+        .panel-header {
+            padding: 14px 18px;
+            font-size: 14px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+            background: var(--surface);
+            z-index: 5;
+        }
+
+        /* Pipeline Visualization */
+        .pipeline-panel { grid-column: 1 / -1; }
+        .pipeline-svg-container {
+            padding: 20px;
+            overflow-x: auto;
+        }
+        .pipeline-svg-container svg { width: 100%; height: 200px; }
+        .station-dot { cursor: pointer; transition: r 0.2s; }
+        .station-dot:hover { r: 14; }
+        .station-label { font-size: 11px; fill: var(--text-muted); text-anchor: middle; }
+        .segment-line { stroke: var(--border); stroke-width: 6; stroke-linecap: round; }
+        .segment-line.has-leak { stroke: var(--danger); stroke-width: 8; }
+        .leak-marker { fill: var(--danger); cursor: pointer; }
+        .leak-marker:hover { r: 10; }
+        .stats-row {
+            display: flex;
+            gap: 16px;
+            padding: 0 20px 16px;
+            flex-wrap: wrap;
+        }
+        .stat-card {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px 18px;
+            flex: 1;
+            min-width: 140px;
+        }
+        .stat-card .stat-value {
+            font-size: 28px;
+            font-weight: 700;
+            line-height: 1.2;
+        }
+        .stat-card .stat-label {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 2px;
+        }
+        .stat-card.danger .stat-value { color: var(--danger); }
+        .stat-card.warning .stat-value { color: var(--warning); }
+        .stat-card.success .stat-value { color: var(--success); }
+        .stat-card.info .stat-value { color: var(--info); }
+
+        /* Events Panel */
+        .events-panel { }
+        .event-item {
+            padding: 12px 18px;
+            border-bottom: 1px solid var(--bg);
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+        .event-item:hover { background: var(--surface2); }
+        .event-item.active { background: var(--surface2); border-left: 3px solid var(--accent); }
+        .event-item .event-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 4px;
+        }
+        .event-item .event-id { font-weight: 600; font-size: 14px; }
+        .event-badge {
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        .event-badge.leak { background: var(--danger); color: #fff; }
+        .event-badge.seep { background: var(--warning); color: #000; }
+        .event-badge.moderate { background: #f97316; color: #fff; }
+        .event-badge.significant { background: var(--danger); color: #fff; }
+        .event-badge.near_rupture { background: #991b1b; color: #fff; }
+        .event-badge.false_positive { background: var(--success); color: #000; }
+        .event-badge.compressor_start { background: var(--info); color: #000; }
+        .event-badge.valve_change { background: #8b5cf6; color: #fff; }
+        .event-badge.temperature_line_pack { background: #06b6d4; color: #000; }
+        .event-item .event-detail {
+            font-size: 12px;
+            color: var(--text-muted);
+            line-height: 1.4;
+        }
+        .event-item .event-time {
+            font-size: 11px;
+            color: var(--text-muted);
+            font-family: monospace;
+        }
+
+        /* Chat Panel */
+        .chat-panel {
+            display: flex;
+            flex-direction: column;
+        }
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 14px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .chat-msg {
+            padding: 10px 14px;
+            border-radius: 10px;
+            font-size: 13px;
+            line-height: 1.5;
+            max-width: 95%;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        .chat-msg.user {
+            background: var(--accent);
+            color: #fff;
+            align-self: flex-end;
+            border-bottom-right-radius: 4px;
+        }
+        .chat-msg.agent {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            align-self: flex-start;
+            border-bottom-left-radius: 4px;
+        }
+        .chat-msg.agent h1, .chat-msg.agent h2, .chat-msg.agent h3 {
+            font-size: 14px; font-weight: 600; margin: 10px 0 6px; color: var(--accent);
+        }
+        .chat-msg.agent h1 { font-size: 16px; }
+        .chat-msg.agent ul, .chat-msg.agent ol { padding-left: 18px; margin: 4px 0; }
+        .chat-msg.agent li { margin-bottom: 3px; }
+        .chat-msg.agent strong { color: var(--text); }
+        .chat-msg.agent code {
+            background: var(--surface2); padding: 1px 5px; border-radius: 3px; font-size: 12px;
+        }
+        .chat-msg.agent pre { background: var(--surface2); padding: 10px; border-radius: 6px; overflow-x: auto; margin: 6px 0; }
+        .chat-msg.agent pre code { background: none; padding: 0; }
+        .chat-msg.agent table { border-collapse: collapse; width: 100%; margin: 8px 0; font-size: 12px; }
+        .chat-msg.agent th { background: var(--surface2); padding: 6px 10px; text-align: left; border: 1px solid var(--border); }
+        .chat-msg.agent td { padding: 5px 10px; border: 1px solid var(--border); }
+        .chat-msg.agent p { margin: 4px 0; }
+        .chat-msg.system {
+            background: transparent;
+            color: var(--text-muted);
+            font-size: 12px;
+            text-align: center;
+            align-self: center;
+        }
+        .chat-input-area {
+            padding: 12px;
+            border-top: 1px solid var(--border);
+            display: flex;
+            gap: 8px;
+        }
+        .chat-input-area input {
+            flex: 1;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 10px 14px;
+            color: var(--text);
+            font-size: 13px;
+            outline: none;
+        }
+        .chat-input-area input:focus { border-color: var(--accent); }
+        .chat-input-area button {
+            background: var(--accent);
+            color: #fff;
+            border: none;
+            border-radius: 8px;
+            padding: 10px 18px;
+            font-weight: 600;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .chat-input-area button:hover { opacity: 0.9; }
+        .chat-input-area button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .quick-actions {
+            padding: 10px 14px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            border-bottom: 1px solid var(--border);
+        }
+        .quick-btn {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            color: var(--text-muted);
+            padding: 5px 10px;
+            border-radius: 6px;
+            font-size: 11px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .quick-btn:hover {
+            border-color: var(--accent);
+            color: var(--text);
+        }
+
+        .loading-spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid var(--text-muted);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Detail Modal */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.7);
+            z-index: 100;
+            justify-content: center;
+            align-items: center;
+        }
+        .modal-overlay.active { display: flex; }
+        .modal {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            width: 90%;
+            max-width: 900px;
+            max-height: 85vh;
+            overflow-y: auto;
+            padding: 24px;
+        }
+        .modal h2 {
+            font-size: 18px;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .modal .close-btn {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            font-size: 24px;
+            cursor: pointer;
+        }
+        .modal .evidence-section {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 14px;
+            margin-bottom: 12px;
+        }
+        .modal .evidence-section h3 {
+            font-size: 13px;
+            color: var(--accent);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .modal .evidence-section p, .modal .evidence-section pre {
+            font-size: 13px;
+            color: var(--text-muted);
+            line-height: 1.5;
+        }
+        .modal pre {
+            background: var(--surface2);
+            padding: 10px;
+            border-radius: 6px;
+            overflow-x: auto;
+            font-family: 'Fira Code', monospace;
+            font-size: 12px;
+        }
+        .chart-container {
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 14px;
+            margin-bottom: 12px;
+        }
+        .chart-container canvas { width: 100% !important; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>
+            <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+                <circle cx="14" cy="14" r="13" stroke="#3b82f6" stroke-width="2"/>
+                <path d="M8 14h12M14 8v12" stroke="#3b82f6" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+            Pipeline Leak Detection Agent
+        </h1>
+        <div style="display:flex;align-items:center;gap:12px">
+            <a href="test" style="color:#3b82f6;text-decoration:none;font-size:14px;font-weight:600;padding:6px 14px;border:1px solid #3b82f6;border-radius:8px;">Test Suite</a>
+            <span class="status-badge">System Online — 8 Stations Monitored</span>
+        </div>
+    </div>
+
+    <div class="main-grid">
+        <!-- Pipeline Visualization -->
+        <div class="panel pipeline-panel">
+            <div class="stats-row" id="stats-row"></div>
+            <div class="pipeline-svg-container" id="pipeline-viz"></div>
+        </div>
+
+        <!-- Events List -->
+        <div class="panel events-panel">
+            <div class="panel-header">Events Timeline (20 Events)</div>
+            <div id="events-list"></div>
+        </div>
+
+        <!-- Chat Panel -->
+        <div class="panel chat-panel">
+            <div class="panel-header">Agent Chat</div>
+            <div class="quick-actions">
+                <button class="quick-btn" onclick="sendQuick('Analyze all 20 events and classify each as leak or false positive. Show a summary table.')">Analyze All Events</button>
+                <button class="quick-btn" onclick="sendQuick('What are the key differences between confirmed leaks and false positives in this dataset?')">Leak vs FP Patterns</button>
+                <button class="quick-btn" onclick="sendQuick('Which segments have the highest integrity risk based on inspection history, cathodic protection, and encroachment data?')">Segment Risk</button>
+                <button class="quick-btn" onclick="sendQuick('Generate a PHMSA incident report for the most severe leak event (LK-005).')">PHMSA Report</button>
+            </div>
+            <div class="chat-messages" id="chat-messages">
+                <div class="chat-msg system">Pipeline Leak Detection Agent ready. Ask me to analyze events, classify anomalies, or generate compliance reports.</div>
+            </div>
+            <div class="chat-input-area">
+                <input type="text" id="chat-input" placeholder="Ask the agent..." onkeydown="if(event.key==='Enter')sendChat()">
+                <button id="send-btn" onclick="sendChat()">Send</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Event Detail Modal -->
+    <div class="modal-overlay" id="modal-overlay" onclick="if(event.target===this)closeModal()">
+        <div class="modal" id="modal-content"></div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script>
+        const BASE = window.location.pathname.replace(/\/$/, '');
+        function apiUrl(path) { return BASE + path; }
+
+        let allEvents = [];
+        let pipelineData = null;
+
+        async function init() {
+            const [pipeRes, evtRes] = await Promise.all([
+                fetch(apiUrl('/api/pipeline')).then(r => r.json()),
+                fetch(apiUrl('/api/events')).then(r => r.json()),
+            ]);
+            pipelineData = pipeRes;
+            allEvents = evtRes.events;
+            renderStats();
+            renderPipeline();
+            renderEvents();
+        }
+
+        const COST_MODEL = {
+            seep:          { repair: 75000,  shutdown: 0,      enviro: 15000,  phmsa_risk: 0,       per_day_delay: 25000 },
+            moderate:      { repair: 250000, shutdown: 100000, enviro: 75000,  phmsa_risk: 500000,  per_day_delay: 85000 },
+            significant:   { repair: 750000, shutdown: 250000, enviro: 350000, phmsa_risk: 1500000, per_day_delay: 200000 },
+            near_rupture:  { repair: 2500000,shutdown: 500000, enviro: 1200000,phmsa_risk: 2700000, per_day_delay: 600000 },
+        };
+
+        function estimateLeakCost(evt) {
+            const c = COST_MODEL[evt.severity];
+            if (!c) return { total: 0, breakdown: {} };
+            const detectionDays = (evt.detection_lag_minutes || 0) / 1440;
+            const delayCost = Math.round(c.per_day_delay * detectionDays);
+            const total = c.repair + c.shutdown + c.enviro + delayCost;
+            return {
+                total,
+                repair: c.repair,
+                shutdown: c.shutdown,
+                environmental: c.enviro,
+                delay_penalty: delayCost,
+                phmsa_max_penalty: c.phmsa_risk,
+                detection_lag_min: evt.detection_lag_minutes || 0,
+            };
+        }
+
+        function formatCurrency(n) {
+            if (n >= 1000000) return '$' + (n / 1000000).toFixed(1) + 'M';
+            if (n >= 1000) return '$' + (n / 1000).toFixed(0) + 'K';
+            return '$' + n;
+        }
+
+        function renderStats() {
+            const leaks = allEvents.filter(e => e.type === 'leak');
+            const fps = allEvents.filter(e => e.type === 'false_positive');
+            const maxLeak = leaks.reduce((max, e) => e.leak_rate > max ? e.leak_rate : max, 0);
+
+            let totalCost = 0;
+            let totalPhmsa = 0;
+            let costBreakdowns = [];
+            for (const leak of leaks) {
+                const cost = estimateLeakCost(leak);
+                totalCost += cost.total;
+                totalPhmsa += cost.phmsa_max_penalty;
+                costBreakdowns.push({ event_id: leak.event_id, ...cost });
+            }
+            const avoidedCost = fps.length * 100000;
+
+            const html = `
+                <div class="stat-card danger">
+                    <div class="stat-value">${leaks.length}</div>
+                    <div class="stat-label">Confirmed Leaks</div>
+                </div>
+                <div class="stat-card success">
+                    <div class="stat-value">${fps.length}</div>
+                    <div class="stat-label">False Positives Dismissed</div>
+                </div>
+                <div class="stat-card warning">
+                    <div class="stat-value">${formatCurrency(totalCost)}</div>
+                    <div class="stat-label">Est. Leak Impact Cost</div>
+                </div>
+                <div class="stat-card danger">
+                    <div class="stat-value">${formatCurrency(totalPhmsa)}</div>
+                    <div class="stat-label">Max PHMSA Penalty Exposure</div>
+                </div>
+                <div class="stat-card success">
+                    <div class="stat-value">${formatCurrency(avoidedCost)}</div>
+                    <div class="stat-label">Avoided Shutdown Cost</div>
+                </div>
+                <div class="stat-card info">
+                    <div class="stat-value">${maxLeak.toFixed(1)}</div>
+                    <div class="stat-label">Max Leak Rate (MMSCFD)</div>
+                </div>
+            `;
+            document.getElementById('stats-row').innerHTML = html;
+
+            window._costBreakdowns = costBreakdowns;
+        }
+
+        function renderPipeline() {
+            const stations = pipelineData.stations;
+            const stationIds = Object.keys(stations).sort();
+            const leaks = allEvents.filter(e => e.type === 'leak');
+            const w = 860, h = 160, padX = 60, padY = 50;
+            const stationSpacing = (w - 2 * padX) / (stationIds.length - 1);
+
+            let svg = `<svg viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">`;
+
+            // Segment lines
+            const segments = pipelineData.segments;
+            for (let i = 0; i < segments.length; i++) {
+                const x1 = padX + i * stationSpacing;
+                const x2 = padX + (i + 1) * stationSpacing;
+                const hasLeak = leaks.some(l => l.segment === segments[i].segment_id);
+                svg += `<line x1="${x1}" y1="80" x2="${x2}" y2="80" class="segment-line ${hasLeak ? 'has-leak' : ''}" />`;
+                // Segment label
+                const mx = (x1 + x2) / 2;
+                svg += `<text x="${mx}" y="115" class="station-label" style="font-size:10px;fill:${hasLeak ? '#ef4444' : '#64748b'}">${segments[i].segment_id}</text>`;
+                svg += `<text x="${mx}" y="128" class="station-label" style="font-size:9px">${segments[i].length_miles}mi</text>`;
+            }
+
+            // Leak markers
+            for (const leak of leaks) {
+                const mile = leak.mile_marker;
+                const x = padX + (mile / 200) * (w - 2 * padX);
+                const severity = leak.severity;
+                const r = severity === 'near_rupture' ? 10 : severity === 'significant' ? 8 : 6;
+                svg += `<circle cx="${x}" cy="80" r="${r}" class="leak-marker" onclick="showEventDetail('${leak.event_id}')">
+                    <title>${leak.event_id}: ${severity} at mile ${mile}</title>
+                </circle>`;
+                svg += `<text x="${x}" y="60" text-anchor="middle" style="font-size:10px;fill:#ef4444;font-weight:600">${leak.event_id}</text>`;
+            }
+
+            // Station dots
+            for (let i = 0; i < stationIds.length; i++) {
+                const x = padX + i * stationSpacing;
+                const sid = stationIds[i];
+                const isCompressor = sid === 'ST-01' || sid === 'ST-04';
+                svg += `<circle cx="${x}" cy="80" r="10" class="station-dot" fill="${isCompressor ? '#3b82f6' : '#64748b'}" stroke="#f1f5f9" stroke-width="2" onclick="showStationInfo('${sid}')" />`;
+                svg += `<text x="${x}" y="36" class="station-label" style="font-weight:600;fill:#f1f5f9">${sid}</text>`;
+                svg += `<text x="${x}" y="150" class="station-label">Mile ${stations[sid].mile}</text>`;
+            }
+
+            svg += '</svg>';
+            document.getElementById('pipeline-viz').innerHTML = svg;
+        }
+
+        function renderEvents() {
+            const container = document.getElementById('events-list');
+            let html = '';
+            for (const evt of allEvents) {
+                const isLeak = evt.type === 'leak';
+                const badgeClass = isLeak ? evt.severity : evt.severity;
+                const badgeText = isLeak ? evt.severity.replace('_', ' ') : evt.severity.replace(/_/g, ' ');
+                const location = isLeak ? `${evt.segment} — Mile ${evt.mile_marker}` : evt.station;
+                const costLine = isLeak ? ` — Est. ${formatCurrency(estimateLeakCost(evt).total)}` : '';
+                html += `
+                    <div class="event-item" onclick="showEventDetail('${evt.event_id}')">
+                        <div class="event-header">
+                            <span class="event-id">${evt.event_id}</span>
+                            <span class="event-badge ${badgeClass}">${badgeText}</span>
+                        </div>
+                        <div class="event-time">${evt.timestamp}</div>
+                        <div class="event-detail">${location}${costLine}</div>
+                        <div class="event-detail">${evt.detail.substring(0, 80)}</div>
+                    </div>`;
+            }
+            container.innerHTML = html;
+        }
+
+        async function showEventDetail(eventId) {
+            const evt = allEvents.find(e => e.event_id === eventId);
+            if (!evt) return;
+
+            const modal = document.getElementById('modal-content');
+            const isLeak = evt.type === 'leak';
+
+            let scadaHtml = '<p>Loading SCADA data...</p>';
+            modal.innerHTML = `
+                <h2>
+                    ${evt.event_id} — ${isLeak ? 'Confirmed Leak' : 'False Positive'}
+                    <button class="close-btn" onclick="closeModal()">&times;</button>
+                </h2>
+                <div class="evidence-section">
+                    <h3>Event Summary</h3>
+                    <p><strong>Time:</strong> ${evt.timestamp}</p>
+                    <p><strong>Type:</strong> ${isLeak ? `Leak — ${evt.severity}` : `False Positive — ${evt.severity.replace(/_/g, ' ')}`}</p>
+                    <p><strong>Location:</strong> ${isLeak ? `${evt.segment}, Mile ${evt.mile_marker}` : evt.station}</p>
+                    ${isLeak ? `<p><strong>Leak Rate:</strong> ${evt.leak_rate} MMSCFD</p>
+                    <p><strong>Detection Lag:</strong> ${evt.detection_lag_minutes} minutes</p>` : ''}
+                    <p><strong>Detail:</strong> ${evt.detail}</p>
+                ${isLeak ? (() => {
+                    const cost = estimateLeakCost(evt);
+                    return `
+                    </div>
+                    <div class="evidence-section">
+                        <h3>Cost Impact Analysis</h3>
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+                            <p><strong>Repair Cost:</strong> ${formatCurrency(cost.repair)}</p>
+                            <p><strong>Shutdown Cost:</strong> ${formatCurrency(cost.shutdown)}</p>
+                            <p><strong>Environmental:</strong> ${formatCurrency(cost.environmental)}</p>
+                            <p><strong>Delay Penalty:</strong> ${formatCurrency(cost.delay_penalty)}</p>
+                        </div>
+                        <p style="margin-top:8px;font-size:14px;font-weight:600;color:var(--warning)">
+                            Total Estimated Impact: ${formatCurrency(cost.total)}
+                        </p>
+                        <p style="font-size:12px;color:var(--text-muted);margin-top:4px">
+                            PHMSA max penalty exposure: ${formatCurrency(cost.phmsa_max_penalty)} per violation
+                        </p>`;
+                })() : ''}
+                </div>
+                <div class="chart-container">
+                    <h3 style="font-size:13px;color:#3b82f6;margin-bottom:8px;">SCADA READINGS</h3>
+                    <canvas id="event-chart" height="200"></canvas>
+                </div>
+                <div class="evidence-section">
+                    <h3>Ask the Agent</h3>
+                    <p>Click to analyze this event:</p>
+                    <button class="quick-btn" style="margin-top:8px" onclick="closeModal();sendQuick('Analyze event ${evt.event_id} in detail. Show all evidence for your classification.')">Full Analysis of ${evt.event_id}</button>
+                    ${isLeak ? `<button class="quick-btn" style="margin-top:8px" onclick="closeModal();sendQuick('Generate a PHMSA Form 7100.1 incident report for ${evt.event_id}.')">Generate PHMSA Report</button>` : ''}
+                </div>
+            `;
+            document.getElementById('modal-overlay').classList.add('active');
+
+            // Load SCADA chart
+            try {
+                const res = await fetch(apiUrl(`/api/scada_snapshot?timestamp=${encodeURIComponent(evt.timestamp)}&window_minutes=120`));
+                const data = await res.json();
+                renderEventChart(data, evt);
+            } catch (e) {
+                console.error(e);
+            }
+        }
+
+        function renderEventChart(data, evt) {
+            const canvas = document.getElementById('event-chart');
+            if (!canvas) return;
+
+            const datasets = [];
+            const colors = ['#3b82f6', '#ef4444', '#22c55e', '#f59e0b', '#8b5cf6', '#06b6d4', '#f97316', '#ec4899'];
+            let labels = [];
+            let i = 0;
+
+            for (const [stationId, stData] of Object.entries(data.stations)) {
+                if (labels.length === 0) {
+                    labels = stData.timestamps.map(t => {
+                        const d = new Date(t);
+                        return d.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+                    });
+                }
+                datasets.push({
+                    label: `${stationId} deficit`,
+                    data: stData.mass_balance_deficit,
+                    borderColor: colors[i % colors.length],
+                    borderWidth: 1.5,
+                    pointRadius: 0,
+                    tension: 0.3,
+                });
+                i++;
+            }
+
+            new Chart(canvas, {
+                type: 'line',
+                data: { labels, datasets },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: { position: 'bottom', labels: { color: '#94a3b8', font: { size: 10 } } },
+                        title: { display: true, text: 'Mass Balance Deficit (MMSCFD)', color: '#f1f5f9', font: { size: 12 } },
+                    },
+                    scales: {
+                        x: { ticks: { color: '#64748b', maxTicksLimit: 12, font: { size: 9 } }, grid: { color: '#1e293b' } },
+                        y: { ticks: { color: '#64748b', font: { size: 10 } }, grid: { color: '#1e293b' } },
+                    },
+                },
+            });
+        }
+
+        function closeModal() {
+            document.getElementById('modal-overlay').classList.remove('active');
+        }
+
+        function showStationInfo(stationId) {
+            const st = pipelineData.stations[stationId];
+            if (!st) return;
+            const modal = document.getElementById('modal-content');
+            modal.innerHTML = `
+                <h2>${stationId} — Station Details <button class="close-btn" onclick="closeModal()">&times;</button></h2>
+                <div class="evidence-section">
+                    <h3>Operating Envelope</h3>
+                    <p><strong>Mile Marker:</strong> ${st.mile}</p>
+                    <p><strong>Pressure Range:</strong> ${st.pressure_min} - ${st.pressure_max} PSI</p>
+                    <p><strong>Flow Range:</strong> ${st.flow_min} - ${st.flow_max} MMSCFD</p>
+                    <p><strong>Type:</strong> ${stationId === 'ST-01' || stationId === 'ST-04' ? 'Compressor Station' : 'Meter / Custody Transfer'}</p>
+                </div>
+                <div class="evidence-section">
+                    <h3>Nearby Events</h3>
+                    ${allEvents.filter(e => e.station === stationId || (pipelineData.segments.find(s => s.from_station === stationId || s.to_station === stationId)?.segment_id === e.segment))
+                        .map(e => `<p>${e.event_id} — ${e.type === 'leak' ? e.severity : e.severity.replace(/_/g, ' ')} — ${e.timestamp}</p>`).join('') || '<p>No events at this station</p>'}
+                </div>
+                <button class="quick-btn" style="margin-top:8px" onclick="closeModal();sendQuick('Show me the SCADA data analysis for station ${stationId} across the full 90-day window. Identify any anomalies.')">Analyze ${stationId}</button>
+            `;
+            document.getElementById('modal-overlay').classList.add('active');
+        }
+
+        // Chat
+        async function sendChat() {
+            const input = document.getElementById('chat-input');
+            const msg = input.value.trim();
+            if (!msg) return;
+            input.value = '';
+            appendChat('user', msg);
+            appendChat('agent', '<div class="loading-spinner"></div> Analyzing...');
+
+            const sendBtn = document.getElementById('send-btn');
+            sendBtn.disabled = true;
+
+            try {
+                const res = await fetch(apiUrl('/api/chat'), {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: msg }),
+                });
+                const data = await res.json();
+                removeLastChat();
+                if (data.error) {
+                    appendChat('agent', `Error: ${data.error}`);
+                } else {
+                    appendChat('agent', data.response);
+                }
+            } catch (e) {
+                removeLastChat();
+                appendChat('agent', `Error: ${e.message}`);
+            }
+            sendBtn.disabled = false;
+        }
+
+        function sendQuick(msg) {
+            document.getElementById('chat-input').value = msg;
+            sendChat();
+        }
+
+        function appendChat(role, text) {
+            const container = document.getElementById('chat-messages');
+            const div = document.createElement('div');
+            div.className = `chat-msg ${role}`;
+            if (role === 'agent' && typeof marked !== 'undefined' && !text.includes('loading-spinner')) {
+                div.innerHTML = marked.parse(text);
+            } else {
+                div.innerHTML = text;
+            }
+            container.appendChild(div);
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function removeLastChat() {
+            const container = document.getElementById('chat-messages');
+            const last = container.lastElementChild;
+            if (last) container.removeChild(last);
+        }
+
+        init();
+    </script>
+</body>
+</html>

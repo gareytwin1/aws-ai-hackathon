@@ -186,4 +186,3 @@ The entire application — agent, tools, data loader, web dashboard, test suite,
 | `app/pipeline_agent/main.py` | AgentCore entrypoint | 87 |
 | `agentcore/agentcore.json` | AgentCore deployment config | 34 |
 | **Total** | | **~2,624** |
-
